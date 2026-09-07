@@ -14,28 +14,9 @@ The algorithm works only in the number field K = Q(theta) of degree d, where
 theta is a root of the monic polynomial f(x) = a0^{d-1} F(x/a0, 1).
 """
 
-from sage.all import (
-    ZZ,
-    QQ,
-    RealField,
-    ComplexField,
-    PolynomialRing,
-    NumberField,
-    matrix,
-    vector,
-    gcd,
-    lcm,
-    inverse_mod,
-    prod,
-    log,
-    exp,
-    pi,
-    sqrt,
-    ceil,
-    floor,
-    Integer,
-    next_prime,
-)
+from sage.all import (ZZ, QQ, RealField, ComplexField, PolynomialRing, NumberField, matrix, vector, gcd, lcm,
+                      inverse_mod, prod, log, exp, pi, sqrt, ceil, floor, Integer, next_prime
+                      )
 
 from sage.modules.free_module_integer import IntegerLattice
 from sage.rings.finite_rings.integer_mod_ring import IntegerModRing
