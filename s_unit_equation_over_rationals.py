@@ -22,23 +22,30 @@ equations using lattice basis reduction algorithms", J. Number Theory 26
    for linear forms in logarithms (Waldschmidt in the real case, van der
    Poorten in the p-adic case).  This is Theorem 5.1 of the paper, i.e.
    Theorem 6.1 of the thesis; it is implemented in
-   ``SUnitEquationOverQ.initial_bound`` and gives an explicit integer
+   ``SUnitSolverOverQ.initial_bound`` and gives an explicit integer
    bound for ``m(x*y*z) = max_i ord_{p_i}(x*y*z)``.
 
 2. The bound is reduced with p-adic approximation lattices and the
    L^3-basis reduction algorithm (Section 5.B of the paper, Section 6.3
    of the thesis, Lemma 5.2).  This is implemented in
-   ``SUnitEquationOverQ.reduce``: for each prime ``p`` the exponents of
+   ``SUnitSolverOverQ.reduce``: for each prime ``p`` the exponents of
    ``x*y*z`` at ``p`` are bounded by applying Lemma 5.2 to the lattice
    ``Gamma'_m``, and the procedure is iterated until the bound
    stabilises.
 
-3. The remaining finitely many exponent vectors are enumerated.
+3. The remaining finitely many exponent vectors are enumerated by the
+   direct search ``SUnitSolverOverQ.solve`` (Smart [1999], the
+   ``simple_loop`` of the reference implementation), completed under the
+   Mobius transformations that preserve ``x + y = 1``.
 
-Currently steps 1 and 2 are implemented.
+The helper :func:`sage.rings.number_field.S_unit_solver.minimal_vector`
+(Smart [1998], V.9/V.10) is a lower bound for the closest vector of a
+lattice, used by the p-adic sieve.
 """
-
-from sage.all import (ZZ, prod, log, exp, RealField, ceil, Qp, GF, matrix, gcd, lcm, xgcd, sqrt)
+from sage.all import (ZZ, QQ, prod, log, exp, RealField, ceil, Qp, GF,
+                      matrix, gcd, lcm, xgcd, sqrt, vector, Primes)
+from sage.rings.number_field.S_unit_solver import minimal_vector
+from itertools import product as iproduct
 from copy import copy
 
 
@@ -59,8 +66,8 @@ class SUnitSolverOverQ:
 
         sage: import os, sys
         sage: sys.path.insert(0, os.getcwd())
-        sage: from s_unit_equation_over_rationals import SUnitEquationOverQ
-        sage: eq = SUnitEquationOverQ([2, 3, 5])
+        sage: from s_unit_equation_over_rationals import SUnitSolverOverQ
+        sage: eq = SUnitSolverOverQ([2, 3, 5])
         sage: float(eq._constants(1, 3/8)["C10"]) < 6.76 * 10**41
         True
         sage: B = eq.initial_bound(mu=1, kappa=3/8)
@@ -70,7 +77,7 @@ class SUnitSolverOverQ:
     Reduce the initial bound (de Weger [1987], Section 5.B; the paper
     reports 56 for S = {2, 3, 5, 7, 11, 13})::
 
-        sage: eq6 = SUnitEquationOverQ([2, 3, 5, 7, 11, 13])
+        sage: eq6 = SUnitSolverOverQ([2, 3, 5, 7, 11, 13])
         sage: eq6.reduce() < 100
         True
     """
@@ -80,6 +87,7 @@ class SUnitSolverOverQ:
         for p in self.S:
             if not p.is_prime():
                 raise ValueError("S must consist of primes only")
+        self.Sset = set(self.S)
         self.t = len(self.S)
         self.prec = prec
         self.verbose = verbose
@@ -399,9 +407,23 @@ class SUnitSolverOverQ:
         r"""
         One full reduction pass: return a new upper bound for
         m(x*y*z) obtained by applying Lemma 5.2 to every prime of S.
+
+        The per-prime bounds used in the pass are stored in
+        ``self._per_prime``.
         """
         X0 = ZZ(X0)
-        return max(self._reduce_one_prime(p, X0) for p in self.S)
+        bounds = {p: self._reduce_one_prime(p, X0) for p in self.S}
+        self._per_prime = bounds
+        return max(bounds.values())
+
+    def per_prime_bounds(self):
+        r"""
+        Return a dictionary ``{p: B_p}`` with ``ord_p(x*y*z) <= B_p`` for
+        every primitive solution of (0.1), obtained by applying the
+        reduction of Section 5.B until it stabilises.
+        """
+        self.reduce()
+        return dict(self._per_prime)
 
     def reduce(self, X0=None):
         r"""
@@ -420,6 +442,85 @@ class SUnitSolverOverQ:
                 break
             X0 = X1
         return X0
+
+    # ------------------------------------------------------------------ #
+    # enumeration (step 3): find all solutions of  X + Y = 1
+    # ------------------------------------------------------------------ #
+    def _is_sinteger(self, n):
+        r"""True if all prime divisors of the integer ``n`` lie in S."""
+        if n == 0:
+            return False
+        for q in ZZ(n).prime_factors():
+            if q not in self.Sset:
+                return False
+        return True
+
+    def _simple_loop(self, bounds):
+        r"""
+        Return the set of positive S-units ``x`` for which there is an
+        S-unit ``y`` with ``x + y = 1`` and with all exponents of ``x``
+        and ``y`` bounded in absolute value by ``bounds``.
+
+        For a prime ``p`` of ``S`` exactly one of the following holds for
+        a solution (x, y): both ``x`` and ``y`` have the same negative
+        valuation, or ``x`` has a positive valuation and ``y`` is prime to
+        ``p``, or vice versa.  This is used to enumerate ``y`` from ``x``
+        in a single pass over the exponent vectors.
+        """
+        S = self.S
+        sols = set()
+        for v in iproduct(*[range(-bounds[p], bounds[p] + 1) for p in S]):
+            x = QQ(1)
+            T = [QQ(1)]
+            for pr, exp in zip(S, v):
+                x = x * QQ(pr) ** exp
+                temp = []
+                for y in T:
+                    if exp < 0:
+                        temp.append(y * QQ(pr) ** exp)
+                    elif exp == 0:
+                        for j in range(bounds[pr] + 1):
+                            temp.append(y * QQ(pr) ** j)
+                    else:
+                        temp.append(y)
+                T = temp
+            for y in T:
+                if x + y == 1:
+                    sols.add(x)
+        return sols
+
+    def solve(self):
+        r"""
+        Return all pairs (X, Y) of S-units of Q with X + Y = 1.
+
+        Step 3 of the algorithm: the reduction of Section 5.B gives
+        per-prime bounds ``ord_p(x*y*z) <= f(p)``, which bound the
+        exponents of every solution; the solutions are then found by the
+        direct enumeration ``_simple_loop`` (Smart [1999]) and completed
+        under the Mobius transformations that preserve the equation
+        x + y = 1.
+
+        EXAMPLES::
+
+            sage: import os, sys
+            sage: sys.path.insert(0, os.getcwd())
+            sage: from s_unit_equation_over_rationals import SUnitSolverOverQ
+            sage: eq = SUnitSolverOverQ([2, 3, 5])
+            sage: sols = eq.solve()
+            sage: all(X + Y == 1 for X, Y in sols)
+            True
+            sage: (2, -1) in sols
+            True
+        """
+        if self.t < 2:
+            raise ValueError("S must contain at least two primes")
+        bounds = self.per_prime_bounds()
+        xs = self._simple_loop(bounds)
+        pairs = set()
+        for x in xs:
+            for v in (x, 1 - x, 1 / x, 1 - 1 / x, 1 / (1 - x), x / (x - 1)):
+                pairs.add((v, 1 - v))
+        return sorted(pairs)
 
     def initial_bound(self, mu=None, kappa=None):
         r"""
@@ -455,3 +556,66 @@ class SUnitSolverOverQ:
             print("C9 = %s" % data["C9"])
             print("C10 = %s" % data["C10"])
         return ZZ(ceil(data["C10"])) + 1
+
+    def initial_bound_thesis(self):
+        r"""
+        Return the initial upper bound of Theorem 6.1 of de Weger's PhD
+        thesis (the version based on Yu's Lemma 2.6), for comparison with
+        :meth:`initial_bound`, which implements Theorem 5.1 of the 1987
+        Journal of Number Theory paper (based on Waldschmidt and van der
+        Poorten).  Both give ``m(x*y*z) < B``; the thesis version is
+        usually much sharper.
+
+        This is the ``initial_bound`` of the reference implementation in
+        ``S-units over Q.py``.
+        """
+        if self.t < 3:
+            raise ValueError("Theorem 6.1 requires at least 3 primes")
+        RR = self.RR
+        e = self._e
+        S = self.S
+        s = len(S)
+        t = (2 * s) // 3
+        P = prod(S)
+        # C(2, t) from Yu's Lemma 2.6 (indexed by t = 2, ..., 7, >= 8)
+        C1t = [768523, 476217, 373024, 318871, 284931, 261379, 2770008]
+        # q_i = smallest prime not dividing p_i*(p_i - 1), and q = max q_i
+        qs = []
+        for p in S:
+            m = p * (p - 1)
+            qi = ZZ(3)
+            while qi.divides(m):
+                qi = Primes().next(qi)
+            qs.append(qi)
+        q = max(qs)
+        a1 = RR(56 * e / 15) if t < 8 else RR(8 * e / 3)
+        c = RR(C1t[6]) if t >= 8 else RR(C1t[t - 2])
+        mm = max(RR((qq - 1) * (2 + 1 / (qq - 1)) ** t) / RR(log(RR(qq))) ** (t + 2)
+                 for qq in S)
+        U = (c * a1 ** t * RR(t) ** ((t + 5) / 2) * RR(q) ** (2 * t)
+             * RR(q - 1) * log(RR(t * q)) ** 2 * mm
+             * log(RR(S[s - 1])) ** t
+             * (log(RR(4) * log(RR(S[s - 1])))
+                + log(RR(S[s - 1])) / (8 * t)))
+        C1 = U / (6 * t)
+        C2 = U * log(RR(4))
+        Omega = RR(1)
+        Vs_1 = RR(1)
+        Vs = RR(1)
+        for i in range(s - t, s):
+            Vi = max(RR(1), log(RR(S[i])))
+            if i == s - 2:
+                Vs_1 = Vi
+            if i == s - 1:
+                Vs = Vi
+            Omega = Omega * Vi
+        C3 = RR(2) ** (9 * t + 26) * RR(t) ** (t + 4) * Omega * log(e * Vs_1)
+        C4 = max(RR(7.4), (C1 * log(RR(P / S[0])) + C3) / log(RR(S[0])))
+        C5 = (C2 * log(RR(P / S[0])) + C3 * log(e * Vs) + RR(0.327)) / log(RR(S[0]))
+        C6 = max(C5, (C2 * log(RR(P / S[0])) + log(RR(2))) / log(RR(S[0])))
+        C7 = RR(2) * (C6 + C4 * log(C4))
+        C8 = RR(S[s - 1])
+        C8 = max(C8, log(RR(2) * (RR(P / S[0])) ** S[s - 1]) / log(RR(S[0])))
+        C8 = max(C8, C2 + C1 * log(C7))
+        C8 = max(C8, C7)
+        return C8
