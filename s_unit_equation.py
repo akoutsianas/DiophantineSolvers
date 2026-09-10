@@ -113,7 +113,7 @@ class SUnitSolver:
         self._G1all = ([self._g01] if self._g01 != 1 else []) + self._G1free
         self._G2all = ([self._g02] if self._g02 != 1 else []) + self._G2free
 
-        self._initial_bound = None
+        self._linear_forms_in_logarithms_bound = None
         self._B = None
         self.supports = None
         self.c = None
@@ -843,43 +843,23 @@ class SUnitSolver:
             return self.K(1)
         return max(tors, key=lambda z: z.multiplicative_order())
 
-    def initial_bound(self):
-        r"""
-        Return the initial upper bound for the exponents of the solutions
-        (step 1 of the algorithm).
-        """
-        if self._initial_bound is None:
-            self._initial_bound()
-        return self._initial_bound
-
-    def reduce(self, B1=None):
-        r"""
-        Return the reduced upper bound for the exponents of the solutions
-        (step 2 of the algorithm).
-
-        INPUT:
-
-        - ``B1`` -- an initial upper bound.  If ``None`` (default),
-          :meth:`initial_bound` is used.
-        """
-        if B1 is None:
-            B1 = self.initial_bound()
-        elif self.supports is None:
-            self._initial_bound()
-        self._reduce_bound(B1)
-        return self._B
-
-    def bound(self):
+    def bound_exponents(self):
         r"""
         Return the (reduced) upper bound for the exponents of the solutions,
         i.e. the result of applying :meth:`reduce` to :meth:`initial_bound`.
         """
-        initial_bound = self._initial_bound()
-        if self._B is None:
-            self._reduce_bound(initial_bound)
-        return self._B
+        linear_forms_in_logarithms_bound = self._compute_bound_from_linear_forms_in_logarithms()
+        if self.verbose:
+            print(f"linear_forms_in_logarithms_bound: {linear_forms_in_logarithms_bound}")
 
-    def _initial_bound(self):
+        reduced_bound_G1, reduced_bound_G2 = self._reduce_bound(linear_forms_in_logarithms_bound,
+                                                                linear_forms_in_logarithms_bound)
+        if self.verbose:
+            print(f"reduced_bound_G1: {reduced_bound_G1}")
+
+        return reduced_bound_G1, reduced_bound_G2
+
+    def _compute_bound_from_linear_forms_in_logarithms(self):
         r"""
         Compute and cache step 1: the initial upper bound `B_1`.
         """
@@ -912,59 +892,70 @@ class SUnitSolver:
                         + [0])
 
         G1finite_init = []
-        initla_bound_finite_G1 = 0
+        initial_bound_finite_G1 = 0
         for prime in finiteSup1:
             B1, M0, M = self.initial_bound_finite_case(
                 self._G2free, prime, self._g02, G1c3, self._Kembeddings)
             G1finite_init.append([prime, M0, M])
-            initla_bound_finite_G1 = max(initla_bound_finite_G1, B1)
+            initial_bound_finite_G1 = max(initial_bound_finite_G1, B1)
 
         G2finite_init = []
-        initla_bound_finite_G2 = 0
+        initial_bound_finite_G2 = 0
         for prime in finiteSup2:
             B1, M0, M = self.initial_bound_finite_case(
                 self._G1free, prime, self._g01, G2c3, self._Kembeddings)
             G2finite_init.append([prime, M0, M])
-            initla_bound_finite_G2 = max(initla_bound_finite_G2, B1)
-        initial_bound_finite = max(initla_bound_finite_G1, initla_bound_finite_G2)
+            initial_bound_finite_G2 = max(initial_bound_finite_G2, B1)
+        initial_bound_finite = max(initial_bound_finite_G1, initial_bound_finite_G2)
 
         self._finite_init = (G1finite_init, G2finite_init)
-        self._initial_bound = self._RR(max(initial_bound_real, initial_bound_complex, initial_bound_finite)).floor()
+        self._linear_forms_in_logarithms_bound = self._RR(
+            max(initial_bound_real, initial_bound_complex, initial_bound_finite)
+        ).floor()
         if self.verbose:
-            print("initial bound: %s" % self._initial_bound)
+            print("initial bound: %s" % self._linear_forms_in_logarithms_bound)
 
         return self._RR(max(initial_bound_real, initial_bound_complex, initial_bound_finite)).floor()
 
-    def _reduce_bound(self):
+    def _reduce_bound(self, bound_G1, bound_G2=None):
         r"""
         Compute and cache step 2: the reduced upper bound, starting from the
-        initial bound ``B1``.
+        initial bounds ``bound_G1`` and  ``bound_G2``.
         """
         same = self._same_groups(self._G1all, self._G2all)
 
         reduced_bound_real_G1 = self._reduce_real(self.supports[0][1], self._G2free,
-                                   self.c[0][2], self._G1free, self._reduced_bound_G1)
+                                   self.c[0][2], self._G1free, bound_G1)
         reduced_bound_complex_G1 = self._reduce_complex(self.supports[0][2], self._G2free,
                                          self._g02, self.c[0][2], self._G1free,
-                                         self._reduced_bound_G1)
+                                         bound_G1)
         reduced_bound_finite_G1 = self._reduce_finite(self._finite_init[0], self._G1free,
-                                       self.c[0][2], self._reduced_bound_G1)
+                                       self.c[0][2], bound_G1)
 
-        self._reduced_bound_G1 = self._RR(
+        if self.verbose:
+            print(f"The bounds for G1 after the reduction are: {reduced_bound_real_G1}, {reduced_bound_complex_G1}, "
+                  f"{reduced_bound_finite_G1}")
+        reduced_bound_G1 = self._RR(
             max(reduced_bound_real_G1, reduced_bound_complex_G1, reduced_bound_finite_G1)
         ).floor()
 
-
+        reduced_bound_G2 = None
         if not same:
-            reduced_bound_real_G2 = self._reduce_real(self.supports[1][1], self._G1free, elf.c[1][2], self._G2free,
-                                                      self._reduced_bound_G2)
+            reduced_bound_real_G2 = self._reduce_real(self.supports[1][1], self._G1free, self.c[1][2], self._G2free,
+                                                      bound_G2)
             reduced_bound_complex_G2 = self._reduce_complex(self.supports[1][2], self._G1free, self._g01, self.c[1][2],
-                                                            self._G2free, self._reduced_bound_G2)
+                                                            self._G2free, bound_G2)
             reduced_bound_finite_G2 = self._reduce_finite(self._finite_init[1], self._G2free, self.c[1][2],
-                                                          self._reduced_bound_G2)
-            self._reduced_bound_G2 = self._RR(
+                                                          bound_G2)
+            reduced_bound_G2 = self._RR(
                 max(reduced_bound_real_G2, reduced_bound_complex_G2, reduced_bound_finite_G2)
             ).floor()
+            if self.verbose:
+                print(f"The bounds for G2 after the reduction are: {reduced_bound_real_G2}, {reduced_bound_complex_G2}, "
+                      f"{reduced_bound_finite_G2}")
+            return reduced_bound_G1, reduced_bound_G2
+
+        return reduced_bound_G1, reduced_bound_G2
 
     def _reduce_real(self, places, other_free, c3, self_free, B0):
         r"""
@@ -1117,8 +1108,8 @@ class SUnitSolver:
             sage: all(x + y == 1 for x, y in SUnitSolver(G, G).solve_pairs())
             True
         """
-        B = self.bound()
-        return self._simple_loop(B)
+        reduced_bound_G1, reduced_bound_G2 = self.bound_exponents()
+        return self._simple_loop(reduced_bound_G1)
 
     def solve_pairs(self):
         r"""
