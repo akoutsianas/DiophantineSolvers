@@ -74,7 +74,7 @@ class SUnitSolver:
         sage: G = [g for g in K.S_unit_group(S=S).gens_values()
         ....:      if g.multiplicative_order() == Infinity]
         sage: sols = SUnitSolver(G, G).solve()
-        sage: all(x + y == 1 for x, y in SUnitSolver(G, G).solve_pairs())
+        sage: all(x + y == 1 for x, y in sols)
         True
     """
 
@@ -123,306 +123,291 @@ class SUnitSolver:
         self._reduced_bound_G1 = None
         self._reduced_bound_G2 = None
 
-    # ------------------------------------------------------------------ #
-    # basic helpers
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _round(a):
+    def solve(self):
         r"""
-        Return the closest integer to the real number ``a``.
-        """
-        if a in ZZ:
-            return a
-        return a.round()
+        Return the list of pairs ``(x, 1 - x)`` of solutions of
+        `x + y = 1` with `x` in `G_1` and `1 - x` in `G_2`.
 
-    @staticmethod
-    def _same_groups(G1, G2):
-        r"""
-        Return ``True`` if the two generator lists describe the same group.
+        EXAMPLES::
+
+            sage: import os, sys
+            sage: sys.path.insert(0, os.getcwd())
+            sage: from s_unit_equation import SUnitSolver
+            sage: K.<a> = NumberField(x^2 + 5)
+            sage: S = K.primes_above(30)
+            sage: G = [g for g in K.S_unit_group(S=S).gens_values()
+            ....:      if g.multiplicative_order() == Infinity]
+            sage: sols = SUnitSolver(G, G).solve()
+            sage: all(x + y == 1 for x, y in sols)
+            True
         """
-        if len(G1) != len(G2):
+        reduced_bound_G1, reduced_bound_G2 = self.bound_exponents()
+        return [(x, 1 - x) for x in self._simple_loop(reduced_bound_G1)]
+
+    def bound_exponents(self):
+        r"""
+        Return the (reduced) upper bound for the exponents of the solutions,
+        i.e. the result of applying :meth:`reduce` to :meth:`initial_bound`.
+        """
+        linear_forms_in_logarithms_bound = self._compute_bound_from_linear_forms_in_logarithms()
+        if self.verbose:
+            print(f"linear_forms_in_logarithms_bound: {linear_forms_in_logarithms_bound}")
+
+        reduced_bound_G1, reduced_bound_G2 = self._reduce_bound(linear_forms_in_logarithms_bound,
+                                                                linear_forms_in_logarithms_bound)
+        if self.verbose and reduced_bound_G2 is None:
+            print(f"reduced_bound_G1: {reduced_bound_G1}")
+        elif self.verbose and reduced_bound_G2 is not None:
+            print(f"reduced_bound_G1: {reduced_bound_G1}, reduced_bound_G2: {reduced_bound_G2}")
+
+        return reduced_bound_G1, reduced_bound_G2
+
+    def _compute_bound_from_linear_forms_in_logarithms(self):
+        r"""
+        Compute and cache step 1: the initial upper bound `B_1`.
+        """
+
+        if len(self._G1free) == 0 or len(self._G2free) == 0:
+            self._initial_bound = 0
+            self._B = 0
+            return
+
+        finiteSup1, realSup1, complexSup1 = self.support_of_G(self._G1all)
+        finiteSup2, realSup2, complexSup2 = self.support_of_G(self._G2all)
+        self.supports = ((finiteSup1, realSup1, complexSup1),
+                         (finiteSup2, realSup2, complexSup2))
+
+        G1c1, G1c2, G1c3 = self.c_constants(self._G1free, self.prec)
+        G2c1, G2c2, G2c3 = self.c_constants(self._G2free, self.prec)
+        self.c = ((G1c1, G1c2, G1c3), (G2c1, G2c2, G2c3))
+
+        initial_bound_real = max([self.initial_bound_real_case(self._G2free, p, G1c3)
+                      for p in realSup1]
+                     + [self.initial_bound_real_case(self._G1free, p, G2c3)
+                        for p in realSup2]
+                     + [0])
+
+        initial_bound_complex = max([self.initial_bound_complex_case(
+            self._G2free, p, self._g02, G1c3) for p in complexSup1]
+                        + [self.initial_bound_complex_case(
+                            self._G1free, p, self._g01, G2c3)
+                           for p in complexSup2]
+                        + [0])
+
+        G1finite_init = []
+        initial_bound_finite_G1 = 0
+        for prime in finiteSup1:
+            B1, M0, M = self.initial_bound_finite_case(
+                self._G2free, prime, self._g02, G1c3, self._Kembeddings)
+            G1finite_init.append([prime, M0, M])
+            initial_bound_finite_G1 = max(initial_bound_finite_G1, B1)
+
+        G2finite_init = []
+        initial_bound_finite_G2 = 0
+        for prime in finiteSup2:
+            B1, M0, M = self.initial_bound_finite_case(
+                self._G1free, prime, self._g01, G2c3, self._Kembeddings)
+            G2finite_init.append([prime, M0, M])
+            initial_bound_finite_G2 = max(initial_bound_finite_G2, B1)
+        initial_bound_finite = max(initial_bound_finite_G1, initial_bound_finite_G2)
+
+        self._finite_init = (G1finite_init, G2finite_init)
+        self._linear_forms_in_logarithms_bound = self._RR(
+            max(initial_bound_real, initial_bound_complex, initial_bound_finite)
+        ).floor()
+        if self.verbose:
+            print("initial bound: %s" % self._linear_forms_in_logarithms_bound)
+
+        return self._RR(max(initial_bound_real, initial_bound_complex, initial_bound_finite)).floor()
+
+    def _reduce_bound(self, bound_G1, bound_G2=None):
+        r"""
+        Compute and cache step 2: the reduced upper bound, starting from the
+        initial bounds ``bound_G1`` and  ``bound_G2``.
+        """
+        same = self._same_groups(self._G1all, self._G2all)
+
+        reduced_bound_real_G1 = self._reduce_real(self.supports[0][1], self._G2free,
+                                   self.c[0][2], self._G1free, bound_G1)
+        reduced_bound_complex_G1 = self._reduce_complex(self.supports[0][2], self._G2free,
+                                         self._g02, self.c[0][2], self._G1free,
+                                         bound_G1)
+        reduced_bound_finite_G1 = self._reduce_finite(self._finite_init[0], self._G1free,
+                                       self.c[0][2], bound_G1)
+
+        if self.verbose:
+            print(f"The bounds for G1 after the reduction are: {reduced_bound_real_G1}, {reduced_bound_complex_G1}, "
+                  f"{reduced_bound_finite_G1}")
+        reduced_bound_G1 = self._RR(
+            max(reduced_bound_real_G1, reduced_bound_complex_G1, reduced_bound_finite_G1)
+        ).floor()
+
+        reduced_bound_G2 = None
+        if not same:
+            reduced_bound_real_G2 = self._reduce_real(self.supports[1][1], self._G1free, self.c[1][2], self._G2free,
+                                                      bound_G2)
+            reduced_bound_complex_G2 = self._reduce_complex(self.supports[1][2], self._G1free, self._g01, self.c[1][2],
+                                                            self._G2free, bound_G2)
+            reduced_bound_finite_G2 = self._reduce_finite(self._finite_init[1], self._G2free, self.c[1][2],
+                                                          bound_G2)
+            reduced_bound_G2 = self._RR(
+                max(reduced_bound_real_G2, reduced_bound_complex_G2, reduced_bound_finite_G2)
+            ).floor()
+            if self.verbose:
+                print(f"The bounds for G2 after the reduction are: {reduced_bound_real_G2}, {reduced_bound_complex_G2}, "
+                      f"{reduced_bound_finite_G2}")
+            return reduced_bound_G1, reduced_bound_G2
+
+        return reduced_bound_G1, reduced_bound_G2
+
+    def _reduce_real(self, places, other_free, c3, self_free, B0):
+        r"""
+        Reduce the bound at a list of real places.
+
+        ``c3`` is the constant of the group whose exponents are being
+        bounded (with free generators ``self_free``), and ``other_free`` are
+        the free generators of the other group.
+        """
+        B_side = 0
+        for place in places:
+            Bold = B0
+            finish = False
+            while not finish:
+                Bnew, increase_precision = self.reduction_step_real_case(
+                    place, Bold, other_free, c3)
+                if not increase_precision:
+                    if Bnew < Bold:
+                        Bold = Bnew
+                        if Bold <= 2:
+                            finish = True
+                            Bold = 2
+                    else:
+                        finish = True
+                else:
+                    c3 = self.c_constants(
+                        self_free, 2 * place.codomain().precision())[2]
+                    place = self.higher_precision(
+                        place, 2 * place.codomain().precision())
+            B_side = max(B_side, Bold)
+        return B_side
+
+    def _reduce_complex(self, places, other_free, other_torsion, c3,
+                        self_free, B0):
+        r"""
+        Reduce the bound at a list of complex places.
+        """
+        B_side = 0
+        for place in places:
+            B_place = 0
+            for g0 in [other_torsion ** i
+                       for i in range(other_torsion.multiplicative_order())]:
+                Bold = B0
+                finish = False
+                while not finish:
+                    Bnew, increase_precision = \
+                        self.reduction_step_complex_case(
+                            place, Bold, other_free, g0, c3 / 2)
+                    if not increase_precision:
+                        if Bnew < Bold:
+                            Bold = Bnew
+                            if Bold <= 2:
+                                finish = True
+                                Bold = 2
+                        else:
+                            finish = True
+                    else:
+                        c3 = self.c_constants(
+                            self_free, 2 * place.codomain().precision())[2]
+                        place = self.higher_precision(
+                            place, 2 * place.codomain().precision())
+                B_place = max(B_place, Bold)
+            B_side = max(B_side, B_place)
+        return B_side
+
+    def _reduce_finite(self, finite_init, self_free, c3, B0):
+        r"""
+        Reduce the bound at the finite places using the precomputed data
+        ``finite_init`` (a list of ``[prime, M0, M]`` triples).
+        """
+        B_side = 0
+        for P in finite_init:
+            B_place = 0
+            if len(P[2]) != 0:
+                prec = self.prec
+                M_logp = [embedding_to_Kp(log_p(m, P[0], prec), P[0], prec)
+                          for m in P[2]]
+                for m0 in P[1]:
+                    Bold = B0
+                    finish = False
+                    while not finish:
+                        Bnew, increase_precision = \
+                            self.reduction_step_finite_case(
+                                P[0], Bold, P[2], M_logp, m0, c3, prec)
+                        if not increase_precision:
+                            if Bnew < Bold:
+                                Bold = Bnew
+                                if Bold <= 2:
+                                    finish = True
+                                    Bold = 2
+                            else:
+                                finish = True
+                        else:
+                            prec *= 2
+                            c3 = self.c_constants(self_free, prec)[2]
+                            M_logp = [embedding_to_Kp(
+                                log_p(m, P[0], prec), P[0], prec)
+                                for m in P[2]]
+                    B_place = max(B_place, Bold)
+            B_side = max(B_side, B_place)
+        return B_side
+
+    def _simple_loop(self, B):
+        r"""
+        Enumerate the solutions `x` of `x + y = 1` with the exponents of
+        `x` in `G_1` bounded by ``B`` in absolute value.
+        """
+        solutions = []
+        r = len(self._G1free)
+        for zeta in self._torsion1:
+            for e in _iproduct(*([range(-B, B + 1)] * r)):
+                x = zeta * prod(g ** ei for g, ei in zip(self._G1free, e))
+                if self._in_G2(1 - x):
+                    if x not in solutions:
+                        solutions.append(x)
+        return solutions
+
+    def _in_G2(self, y):
+        r"""
+        Return ``True`` if ``y`` lies in `G_2`.
+        """
+        if y == 0:
             return False
-        return all(a == b for a, b in zip(G1, G2))
+        if len(self._G2all) == 0:
+            return y == 1
+        if self._G2_ctx is None:
+            self._G2_ctx = self._group_context(self._G2all)
+        SunitK, A, supp = self._G2_ctx
+        if not self.K.ideal(y).is_S_unit(S=supp):
+            return False
+        return vector(SunitK(y).list()) in A.row_space()
 
-    def is_real_place(self, place):
+    def is_in_G(self, x, G):
         r"""
-        Return ``True`` if the infinite ``place`` is real, otherwise
-        ``False``.
+        Return ``True`` if the non-zero element ``x`` lies in the group
+        generated by ``G``.
         """
-        prec = place.codomain().precision()
-        return place.codomain() == RealField(prec)
-
-    def higher_precision(self, place, new_prec):
-        r"""
-        Return the infinite ``place`` with precision raised to ``new_prec``
-        bits.
-        """
-        old_prec = place.codomain().precision()
-        Kplaces = self.K.places(prec=new_prec)
-        gens = self.K.gens()
-
-        i = 1
-        while i <= old_prec:
-            Q = [q for q in Kplaces
-                 if len([0 for a in gens
-                         if (q(a) - place(a)).abs() <= 2 ** (-i)]) == len(gens)]
-            if len(Q) == 1:
-                return Q[0]
-            i += 1
-        raise ValueError('I cannot find the place')
-
-    def modified_height_infinite_case(self, a, place):
-        r"""
-        Return the modified absolute height of ``a`` at the infinite
-        ``place``.
-
-        REFERENCE:
-
-        A. Baker and G. Wustholz, "Logarithmic forms and group varieties",
-        J. Reine Angew. Math. 442 (1993), 19-62.
-        """
-        if a == 0 or a == 1:
-            raise ValueError('a has not to be 0 or 1')
-
-        precision = place.codomain().precision()
-        K = place.domain()
-        a = K(a)
-        d = K.absolute_degree()
-        height = max([d * (a.global_height(place.codomain().precision())),
-                      log(place(a)).abs(), 1]) / d
-        if RR(height) == Infinity:
-            return self.modified_height_infinite_case(
-                a, self.higher_precision(place, 2 * precision))
-        return max([d * (a.global_height(place.codomain().precision())),
-                    log(place(a)).abs(), 1]) / d
-
-    def e_s_real(self, a, place):
-        r"""
-        Return ``a`` if ``place(a) >= 0`` and ``-a`` otherwise.
-        """
-        if place(a) < 0:
-            return (-1) * a
-        return a
-
-    def Baker_Wustholz_low_lattice_bound(self, A, place):
-        r"""
-        Return the constant of the lower bound of Baker-Wustholz at
-        ``place``.
-        """
-        if len(A) == 0:
-            raise ValueError('The list A is empty')
-
-        d = A[0].parent().absolute_degree()
-        n = len(A)
-        c = 18 * factorial(n + 1) * n ** (n + 1) \
-            * (32 * d) ** (n + 2) * log(2 * n * d)
-        return c * prod([self.modified_height_infinite_case(a, place)
-                         for a in A])
-
-    # ------------------------------------------------------------------ #
-    # finite place helpers
-    # ------------------------------------------------------------------ #
-    def a_basis_with_0_order_at_p(self, prime, G):
-        r"""
-        Return the basis used in Lemma IX.3 of Smart's book.
-
-        INPUT:
-
-        - ``prime`` -- a prime ideal of a number field `K`
-        - ``G`` -- a list of generators of a subgroup of `K^*`
-
-        OUTPUT:
-
-        a triple ``(M0, M, k)`` where ``M0`` contains all possible `\mu_0`,
-        ``M`` contains all possible `\mu_i` (``i > 0``) and ``k`` is the
-        index of the distinguished generator.
-        """
-        K = prime.ring()
-        g0 = [g for g in G if g.multiplicative_order() != Infinity]
-        Gfree = [g for g in G if g.multiplicative_order() == Infinity]
-        if len(g0) == 1:
-            g0 = g0[0]
-        else:
-            g0 = K(1)
-
-        if len(Gfree) == 0:
-            raise ValueError('The group does not have free part')
-        if g0 == 0 or len([g for g in Gfree if g == 0]) != 0:
-            raise ValueError('Either g0 = 0 or there is a zero element in G')
-
-        e = prime.absolute_ramification_index()
-        f = prime.residue_class_degree()
-        ordprime = lambda x: x.valuation(prime)
-
-        N = [ordprime(K(g)) for g in Gfree]
-        n_k = min(N)
-
-        if len([a for a in N if a != 0]) == 0:
-            return [-g0 ** i for i in range(g0.multiplicative_order())], \
-                Gfree, 0
-
-        N_abs = [a.abs() for a in N]
-        n_k_abs = min([a for a in N_abs if a > 0])
-        k = N_abs.index(n_k_abs)
-        n_k = N[k]
-        N2 = [N[i] for i in range(len(N)) if i != k]
-        G2 = [Gfree[i] for i in range(len(Gfree)) if i != k]
-
-        M0 = []
-        for vec in _iproduct(*([range(n_k_abs)] * len(N2))):
-            sigma = -(vector(vec) * vector(N2))
-            if sigma % n_k == 0:
-                for g in [g0 ** i for i in range(g0.multiplicative_order())]:
-                    m0 = -g * prod([a ** b for a, b in zip(G2, vec)]) \
-                        * Gfree[k] ** (sigma / n_k)
-                    if m0 not in M0:
-                        M0.append(m0)
-        return M0, [(g ** n_k) * (Gfree[k] ** (-n))
-                    for g, n in zip(G2, N2)], k + 1
-
-    def upper_bound_modified_height_finite_case(self, a, embeddings, prime):
-        r"""
-        Return an upper bound for the modified height with respect to
-        ``prime``.
-
-        REFERENCE:
-
-        N. Tzanakis and B. M. M. de Weger, "Solving a specific Thue-Mahler
-        equation", Math. Comp. 57 (1991), 799-815.
-        """
-        K = prime.ring()
-        p = prime.absolute_norm().factor()[0][0]
-        f = prime.residue_class_degree()
-        d = K.absolute_degree()
-        prec = embeddings[0].codomain().precision()
-
-        t = polygen(K)
-        if (p > 2 and not (t ** 2 + 1).is_irreducible()) or \
-           (p == 2 and not (t ** 2 + 3).is_irreducible()):
-            D = d
-        else:
-            D = 2 * d
-        height = max([a.global_height(prec),
-                      max([log(em(a)).abs() for em in embeddings])
-                      / (2 * pi * D),
-                      (f * log(p)) / d])
-        if RR(height) == Infinity:
-            return self.upper_bound_modified_height_finite_case(
-                a, [self.higher_precision(em, 2 * prec) for em in embeddings],
-                prime)
-        return max([a.global_height(prec),
-                    max([log(em(a)).abs() for em in embeddings])
-                    / (2 * pi * D),
-                    (f * log(p)) / d])
-
-    def Yu_theorem(self, A, prime, embeddings):
-        r"""
-        Return the pair `(C_1C_2C_3, C_1C_2C_3C_4)` of Yu's theorem.
-
-        REFERENCE:
-
-        N. Tzanakis and B. M. M. de Weger, "Solving a specific Thue-Mahler
-        equation", Math. Comp. 57 (1991), 799-815.
-        """
-        if len(A) == 0:
-            raise ValueError('The list A is empty')
-
-        if len([a for a in A if a.valuation(prime) != 0]) != 0:
-            raise ValueError(
-                'There is an element in A which does not have 0 valuation')
-
-        K = prime.ring()
-        d = K.absolute_degree()
-        t = polygen(K)
-        p = prime.absolute_norm().factor()[0][0]
-        n = len(A)
-        f = prime.residue_class_degree()
-
-        D = 2 * d
-        if (p > 2 and not (t ** 2 + 1).is_irreducible()) or \
-           (p == 2 and not (t ** 2 + 3).is_irreducible()):
-            D = d
-
-        if p % 4 == 1:
-            c1 = 35009 * (45 / 2) ** n
-        elif p % 4 == 3:
-            c1 = 30760 * 25 ** n
-        else:
-            c1 = 197142 * 36 ** n
-
-        c4 = 2 * log(D)
-        v = [self.upper_bound_modified_height_finite_case(a, embeddings, prime)
-             for a in A]
-        V = max(v)
-
-        if p != 2:
-            c3 = log(2 ** 11 * (n + 1) ** 2 * D ** 2 * V)
-        else:
-            c3 = log(3 * 2 ** 10 * (n + 1) ** 2 * D ** 2 * V)
-        c2 = (n + 1) ** (2 * n + 4) * p ** ((D * f) / d) \
-            * (f * log(p)) ** (-n - 1) * D ** (n + 2) * prod(v)
-
-        return c1 * c2 * c3, c1 * c2 * c3 * c4
-
-    # ------------------------------------------------------------------ #
-    # support and membership
-    # ------------------------------------------------------------------ #
-    def support_of_G(self, G):
-        r"""
-        Return the support of the group generated by ``G``.
-
-        OUTPUT:
-
-        a triple ``(finite, real, complex)`` of finite primes, real places
-        and complex places occurring in the support.
-        """
+        if x == 0:
+            raise ValueError('x is the zero element')
         if len(G) == 0:
             raise ValueError('G is empty')
 
-        complexsup = [c for c in self._Kcomplexplaces
-                      if len([a for a in G
-                              if (c(a).abs() - 1).abs()
-                              >= 2 ** (-self.prec / 2)]) > 0]
-        realsup = [c for c in self._Krealplaces
-                   if len([a for a in G
-                           if (c(a).abs() - 1).abs()
-                           >= 2 ** (-self.prec / 2)]) > 0]
+        K = G[0].parent()
+        SunitK, A, supp = self._group_context(G)
 
-        finitesup = []
-        for g in G:
-            for p in g.support():
-                if p not in finitesup:
-                    finitesup.append(p)
-
-        rational_primes_below = [p.absolute_norm().factor()[0][0]
-                                 for p in finitesup]
-        for i in range(len(finitesup)):
-            for j in range(i, len(finitesup)):
-                if rational_primes_below[j - 1] > rational_primes_below[j]:
-                    rational_primes_below[j - 1], rational_primes_below[j] = \
-                        rational_primes_below[j], rational_primes_below[j - 1]
-                    finitesup[j - 1], finitesup[j] = \
-                        finitesup[j], finitesup[j - 1]
-        return finitesup, realsup, complexsup
-
-    def is_S_unit_element(self, SUK, u):
-        r"""
-        Return ``True`` if ``u`` is an ``S``-unit for the group ``SUK``.
-
-        INPUT:
-
-        - ``SUK`` -- an ``S``-unit group of a number field `K`
-        - ``u`` -- an element of `K`
-        """
-        K = SUK.number_field()
-        try:
-            u = K(u)
-        except (TypeError, ValueError):
-            raise ValueError("%s is not an element of %s" % (u, K))
-
-        if u == 0:
-            return False
-        return K.ideal(u).is_S_unit(list(SUK.primes()))
+        if K.ideal(x).is_S_unit(S=supp):
+            y = vector(SunitK(x).list())
+            return y in A.row_space()
+        return False
 
     def _group_context(self, G):
         r"""
@@ -443,27 +428,6 @@ class SUnitSolver:
         A[k, 0] = m0
         return SunitK, A, supp
 
-    def is_in_G(self, x, G):
-        r"""
-        Return ``True`` if the non-zero element ``x`` lies in the group
-        generated by ``G``.
-        """
-        if x == 0:
-            raise ValueError('x is the zero element')
-        if len(G) == 0:
-            raise ValueError('G is empty')
-
-        K = G[0].parent()
-        SunitK, A, supp = self._group_context(G)
-
-        if K.ideal(x).is_S_unit(S=supp):
-            y = vector(SunitK(x).list())
-            return y in A.row_space()
-        return False
-
-    # ------------------------------------------------------------------ #
-    # constants c_1, c_2, c_3
-    # ------------------------------------------------------------------ #
     def c_constants(self, G, precision):
         r"""
         Return the constants `c_1, c_2, c_3` of page 136 of Smart's book.
@@ -477,76 +441,6 @@ class SUnitSolver:
             return Real(c1d), Real(c2d), Real(c3d)
         return c1, c2, c3
 
-    def c_constants_without_check(self, G, precision):
-        r"""
-        Return the constants `c_1, c_2, c_3` of page 136 of Smart's book.
-        """
-        if len(G) == 0:
-            raise ValueError('G is empty')
-        if len([g for g in G if g.multiplicative_order() != Infinity]) > 0:
-            raise ValueError('G has an element with finite multiplicative order')
-
-        finiteSup, realSup, complexSup = self.support_of_G(G)
-
-        if len([s for s in realSup if not self.is_real_place(s)]) > 0:
-            raise ValueError('realSup has a complex place')
-        if len([s for s in complexSup if self.is_real_place(s)]) > 0:
-            raise ValueError('complexSup has a real place')
-
-        if len(realSup) > 0:
-            K = realSup[0].domain()
-        elif len(complexSup) > 0:
-            K = complexSup[0].domain()
-        else:
-            K = finiteSup[0].ring()
-
-        A = copy(zero_matrix(RealField(precision),
-                             len(finiteSup) + len(complexSup) + len(realSup),
-                             len(G)))
-
-        for i, p in enumerate(finiteSup):
-            v = [0] * len(G)
-            for j, g in enumerate(G):
-                if (K(g)).abs_non_arch(p, prec=precision) != 1:
-                    v[j] = log((K(g)).abs_non_arch(p, prec=precision))
-            A[i] = vector(v)
-
-        for i, s in enumerate(realSup):
-            v = [0] * len(G)
-            for j, g in enumerate(G):
-                if abs(s(g)) != 1:
-                    v[j] = log(abs(s(g)))
-            A[i + len(finiteSup)] = vector(v)
-
-        for i, s in enumerate(complexSup):
-            v = [0] * len(G)
-            for j, g in enumerate(G):
-                if abs(s(g)) != 1:
-                    v[j] = 2 * log(abs(s(g)))
-            A[i + len(finiteSup) + len(realSup)] = vector(v)
-
-        n = len(finiteSup) + len(complexSup) + len(realSup)
-        s = Set(range(n))
-        X = s.subsets(len(G)).list()
-        c1 = -Infinity
-        for g in X:
-            M = A[g.list(), :]
-            d = M.determinant()
-            if d > 2 ** (-RR(precision / 2).floor()):
-                B = M.inverse()
-                a = max([sum([b.abs() for b in row]) for row in B.rows()])
-                if a > c1:
-                    c1 = a
-
-        c2 = 1 / c1
-        c3 = c2 / len(G)
-        c3 = (99 * c3) / 100
-
-        return c1, c2, c3
-
-    # ------------------------------------------------------------------ #
-    # initial bounds (step 1)
-    # ------------------------------------------------------------------ #
     def initial_bound_real_case(self, G2free, place, c3):
         r"""
         Return the initial bound of Lemma IX.1.1 at a real ``place``.
@@ -609,9 +503,6 @@ class SUnitSolver:
 
         return B, M0, M
 
-    # ------------------------------------------------------------------ #
-    # reduction (step 2)
-    # ------------------------------------------------------------------ #
     def reduction_step_real_case(self, place, B0, G, c7):
         r"""
         Reduce the bound ``B0`` at the real ``place`` using LLL.
@@ -834,285 +725,367 @@ class SUnitSolver:
                 return low_bound, False
             u += 1
 
-    # ------------------------------------------------------------------ #
-    # torsion and the bound
-    # ------------------------------------------------------------------ #
+    def c_constants_without_check(self, G, precision):
+        r"""
+        Return the constants `c_1, c_2, c_3` of page 136 of Smart's book.
+        """
+        if len(G) == 0:
+            raise ValueError('G is empty')
+        if len([g for g in G if g.multiplicative_order() != Infinity]) > 0:
+            raise ValueError('G has an element with finite multiplicative order')
+
+        finiteSup, realSup, complexSup = self.support_of_G(G)
+
+        if len([s for s in realSup if not self.is_real_place(s)]) > 0:
+            raise ValueError('realSup has a complex place')
+        if len([s for s in complexSup if self.is_real_place(s)]) > 0:
+            raise ValueError('complexSup has a real place')
+
+        if len(realSup) > 0:
+            K = realSup[0].domain()
+        elif len(complexSup) > 0:
+            K = complexSup[0].domain()
+        else:
+            K = finiteSup[0].ring()
+
+        A = copy(zero_matrix(RealField(precision),
+                             len(finiteSup) + len(complexSup) + len(realSup),
+                             len(G)))
+
+        for i, p in enumerate(finiteSup):
+            v = [0] * len(G)
+            for j, g in enumerate(G):
+                if (K(g)).abs_non_arch(p, prec=precision) != 1:
+                    v[j] = log((K(g)).abs_non_arch(p, prec=precision))
+            A[i] = vector(v)
+
+        for i, s in enumerate(realSup):
+            v = [0] * len(G)
+            for j, g in enumerate(G):
+                if abs(s(g)) != 1:
+                    v[j] = log(abs(s(g)))
+            A[i + len(finiteSup)] = vector(v)
+
+        for i, s in enumerate(complexSup):
+            v = [0] * len(G)
+            for j, g in enumerate(G):
+                if abs(s(g)) != 1:
+                    v[j] = 2 * log(abs(s(g)))
+            A[i + len(finiteSup) + len(realSup)] = vector(v)
+
+        n = len(finiteSup) + len(complexSup) + len(realSup)
+        s = Set(range(n))
+        X = s.subsets(len(G)).list()
+        c1 = -Infinity
+        for g in X:
+            M = A[g.list(), :]
+            d = M.determinant()
+            if d > 2 ** (-RR(precision / 2).floor()):
+                B = M.inverse()
+                a = max([sum([b.abs() for b in row]) for row in B.rows()])
+                if a > c1:
+                    c1 = a
+
+        c2 = 1 / c1
+        c3 = c2 / len(G)
+        c3 = (99 * c3) / 100
+
+        return c1, c2, c3
+
+    def Baker_Wustholz_low_lattice_bound(self, A, place):
+        r"""
+        Return the constant of the lower bound of Baker-Wustholz at
+        ``place``.
+        """
+        if len(A) == 0:
+            raise ValueError('The list A is empty')
+
+        d = A[0].parent().absolute_degree()
+        n = len(A)
+        c = 18 * factorial(n + 1) * n ** (n + 1) \
+            * (32 * d) ** (n + 2) * log(2 * n * d)
+        return c * prod([self.modified_height_infinite_case(a, place)
+                         for a in A])
+
+    def Yu_theorem(self, A, prime, embeddings):
+        r"""
+        Return the pair `(C_1C_2C_3, C_1C_2C_3C_4)` of Yu's theorem.
+
+        REFERENCE:
+
+        N. Tzanakis and B. M. M. de Weger, "Solving a specific Thue-Mahler
+        equation", Math. Comp. 57 (1991), 799-815.
+        """
+        if len(A) == 0:
+            raise ValueError('The list A is empty')
+
+        if len([a for a in A if a.valuation(prime) != 0]) != 0:
+            raise ValueError(
+                'There is an element in A which does not have 0 valuation')
+
+        K = prime.ring()
+        d = K.absolute_degree()
+        t = polygen(K)
+        p = prime.absolute_norm().factor()[0][0]
+        n = len(A)
+        f = prime.residue_class_degree()
+
+        D = 2 * d
+        if (p > 2 and not (t ** 2 + 1).is_irreducible()) or \
+           (p == 2 and not (t ** 2 + 3).is_irreducible()):
+            D = d
+
+        if p % 4 == 1:
+            c1 = 35009 * (45 / 2) ** n
+        elif p % 4 == 3:
+            c1 = 30760 * 25 ** n
+        else:
+            c1 = 197142 * 36 ** n
+
+        c4 = 2 * log(D)
+        v = [self.upper_bound_modified_height_finite_case(a, embeddings, prime)
+             for a in A]
+        V = max(v)
+
+        if p != 2:
+            c3 = log(2 ** 11 * (n + 1) ** 2 * D ** 2 * V)
+        else:
+            c3 = log(3 * 2 ** 10 * (n + 1) ** 2 * D ** 2 * V)
+        c2 = (n + 1) ** (2 * n + 4) * p ** ((D * f) / d) \
+            * (f * log(p)) ** (-n - 1) * D ** (n + 2) * prod(v)
+
+        return c1 * c2 * c3, c1 * c2 * c3 * c4
+
+    def a_basis_with_0_order_at_p(self, prime, G):
+        r"""
+        Return the basis used in Lemma IX.3 of Smart's book.
+
+        INPUT:
+
+        - ``prime`` -- a prime ideal of a number field `K`
+        - ``G`` -- a list of generators of a subgroup of `K^*`
+
+        OUTPUT:
+
+        a triple ``(M0, M, k)`` where ``M0`` contains all possible `\mu_0`,
+        ``M`` contains all possible `\mu_i` (``i > 0``) and ``k`` is the
+        index of the distinguished generator.
+        """
+        K = prime.ring()
+        g0 = [g for g in G if g.multiplicative_order() != Infinity]
+        Gfree = [g for g in G if g.multiplicative_order() == Infinity]
+        if len(g0) == 1:
+            g0 = g0[0]
+        else:
+            g0 = K(1)
+
+        if len(Gfree) == 0:
+            raise ValueError('The group does not have free part')
+        if g0 == 0 or len([g for g in Gfree if g == 0]) != 0:
+            raise ValueError('Either g0 = 0 or there is a zero element in G')
+
+        e = prime.absolute_ramification_index()
+        f = prime.residue_class_degree()
+        ordprime = lambda x: x.valuation(prime)
+
+        N = [ordprime(K(g)) for g in Gfree]
+        n_k = min(N)
+
+        if len([a for a in N if a != 0]) == 0:
+            return [-g0 ** i for i in range(g0.multiplicative_order())], \
+                Gfree, 0
+
+        N_abs = [a.abs() for a in N]
+        n_k_abs = min([a for a in N_abs if a > 0])
+        k = N_abs.index(n_k_abs)
+        n_k = N[k]
+        N2 = [N[i] for i in range(len(N)) if i != k]
+        G2 = [Gfree[i] for i in range(len(Gfree)) if i != k]
+
+        M0 = []
+        for vec in _iproduct(*([range(n_k_abs)] * len(N2))):
+            sigma = -(vector(vec) * vector(N2))
+            if sigma % n_k == 0:
+                for g in [g0 ** i for i in range(g0.multiplicative_order())]:
+                    m0 = -g * prod([a ** b for a, b in zip(G2, vec)]) \
+                        * Gfree[k] ** (sigma / n_k)
+                    if m0 not in M0:
+                        M0.append(m0)
+        return M0, [(g ** n_k) * (Gfree[k] ** (-n))
+                    for g, n in zip(G2, N2)], k + 1
+
+    def support_of_G(self, G):
+        r"""
+        Return the support of the group generated by ``G``.
+
+        OUTPUT:
+
+        a triple ``(finite, real, complex)`` of finite primes, real places
+        and complex places occurring in the support.
+        """
+        if len(G) == 0:
+            raise ValueError('G is empty')
+
+        complexsup = [c for c in self._Kcomplexplaces
+                      if len([a for a in G
+                              if (c(a).abs() - 1).abs()
+                              >= 2 ** (-self.prec / 2)]) > 0]
+        realsup = [c for c in self._Krealplaces
+                   if len([a for a in G
+                           if (c(a).abs() - 1).abs()
+                           >= 2 ** (-self.prec / 2)]) > 0]
+
+        finitesup = []
+        for g in G:
+            for p in g.support():
+                if p not in finitesup:
+                    finitesup.append(p)
+
+        rational_primes_below = [p.absolute_norm().factor()[0][0]
+                                 for p in finitesup]
+        for i in range(len(finitesup)):
+            for j in range(i, len(finitesup)):
+                if rational_primes_below[j - 1] > rational_primes_below[j]:
+                    rational_primes_below[j - 1], rational_primes_below[j] = \
+                        rational_primes_below[j], rational_primes_below[j - 1]
+                    finitesup[j - 1], finitesup[j] = \
+                        finitesup[j], finitesup[j - 1]
+        return finitesup, realsup, complexsup
+
+    def modified_height_infinite_case(self, a, place):
+        r"""
+        Return the modified absolute height of ``a`` at the infinite
+        ``place``.
+
+        REFERENCE:
+
+        A. Baker and G. Wustholz, "Logarithmic forms and group varieties",
+        J. Reine Angew. Math. 442 (1993), 19-62.
+        """
+        if a == 0 or a == 1:
+            raise ValueError('a has not to be 0 or 1')
+
+        precision = place.codomain().precision()
+        K = place.domain()
+        a = K(a)
+        d = K.absolute_degree()
+        height = max([d * (a.global_height(place.codomain().precision())),
+                      log(place(a)).abs(), 1]) / d
+        if RR(height) == Infinity:
+            return self.modified_height_infinite_case(
+                a, self.higher_precision(place, 2 * precision))
+        return max([d * (a.global_height(place.codomain().precision())),
+                    log(place(a)).abs(), 1]) / d
+
+    def upper_bound_modified_height_finite_case(self, a, embeddings, prime):
+        r"""
+        Return an upper bound for the modified height with respect to
+        ``prime``.
+
+        REFERENCE:
+
+        N. Tzanakis and B. M. M. de Weger, "Solving a specific Thue-Mahler
+        equation", Math. Comp. 57 (1991), 799-815.
+        """
+        K = prime.ring()
+        p = prime.absolute_norm().factor()[0][0]
+        f = prime.residue_class_degree()
+        d = K.absolute_degree()
+        prec = embeddings[0].codomain().precision()
+
+        t = polygen(K)
+        if (p > 2 and not (t ** 2 + 1).is_irreducible()) or \
+           (p == 2 and not (t ** 2 + 3).is_irreducible()):
+            D = d
+        else:
+            D = 2 * d
+        height = max([a.global_height(prec),
+                      max([log(em(a)).abs() for em in embeddings])
+                      / (2 * pi * D),
+                      (f * log(p)) / d])
+        if RR(height) == Infinity:
+            return self.upper_bound_modified_height_finite_case(
+                a, [self.higher_precision(em, 2 * prec) for em in embeddings],
+                prime)
+        return max([a.global_height(prec),
+                    max([log(em(a)).abs() for em in embeddings])
+                    / (2 * pi * D),
+                    (f * log(p)) / d])
+
+    def is_real_place(self, place):
+        r"""
+        Return ``True`` if the infinite ``place`` is real, otherwise
+        ``False``.
+        """
+        prec = place.codomain().precision()
+        return place.codomain() == RealField(prec)
+
+    def e_s_real(self, a, place):
+        r"""
+        Return ``a`` if ``place(a) >= 0`` and ``-a`` otherwise.
+        """
+        if place(a) < 0:
+            return (-1) * a
+        return a
+
+    def higher_precision(self, place, new_prec):
+        r"""
+        Return the infinite ``place`` with precision raised to ``new_prec``
+        bits.
+        """
+        old_prec = place.codomain().precision()
+        Kplaces = self.K.places(prec=new_prec)
+        gens = self.K.gens()
+
+        i = 1
+        while i <= old_prec:
+            Q = [q for q in Kplaces
+                 if len([0 for a in gens
+                         if (q(a) - place(a)).abs() <= 2 ** (-i)]) == len(gens)]
+            if len(Q) == 1:
+                return Q[0]
+            i += 1
+        raise ValueError('I cannot find the place')
+
+    @staticmethod
+    def _round(a):
+        r"""
+        Return the closest integer to the real number ``a``.
+        """
+        if a in ZZ:
+            return a
+        return a.round()
+
+    @staticmethod
+    def _same_groups(G1, G2):
+        r"""
+        Return ``True`` if the two generator lists describe the same group.
+        """
+        if len(G1) != len(G2):
+            return False
+        return all(a == b for a, b in zip(G1, G2))
+
     def _torsion_generator(self, tors):
         tors = [z for z in tors if z != 0]
         if len(tors) == 0:
             return self.K(1)
         return max(tors, key=lambda z: z.multiplicative_order())
 
-    def bound_exponents(self):
+    def is_S_unit_element(self, SUK, u):
         r"""
-        Return the (reduced) upper bound for the exponents of the solutions,
-        i.e. the result of applying :meth:`reduce` to :meth:`initial_bound`.
+        Return ``True`` if ``u`` is an ``S``-unit for the group ``SUK``.
+
+        INPUT:
+
+        - ``SUK`` -- an ``S``-unit group of a number field `K`
+        - ``u`` -- an element of `K`
         """
-        linear_forms_in_logarithms_bound = self._compute_bound_from_linear_forms_in_logarithms()
-        if self.verbose:
-            print(f"linear_forms_in_logarithms_bound: {linear_forms_in_logarithms_bound}")
+        K = SUK.number_field()
+        try:
+            u = K(u)
+        except (TypeError, ValueError):
+            raise ValueError("%s is not an element of %s" % (u, K))
 
-        reduced_bound_G1, reduced_bound_G2 = self._reduce_bound(linear_forms_in_logarithms_bound,
-                                                                linear_forms_in_logarithms_bound)
-        if self.verbose:
-            print(f"reduced_bound_G1: {reduced_bound_G1}")
-
-        return reduced_bound_G1, reduced_bound_G2
-
-    def _compute_bound_from_linear_forms_in_logarithms(self):
-        r"""
-        Compute and cache step 1: the initial upper bound `B_1`.
-        """
-
-        if len(self._G1free) == 0 or len(self._G2free) == 0:
-            self._initial_bound = 0
-            self._B = 0
-            return
-
-        finiteSup1, realSup1, complexSup1 = self.support_of_G(self._G1all)
-        finiteSup2, realSup2, complexSup2 = self.support_of_G(self._G2all)
-        self.supports = ((finiteSup1, realSup1, complexSup1),
-                         (finiteSup2, realSup2, complexSup2))
-
-        G1c1, G1c2, G1c3 = self.c_constants(self._G1free, self.prec)
-        G2c1, G2c2, G2c3 = self.c_constants(self._G2free, self.prec)
-        self.c = ((G1c1, G1c2, G1c3), (G2c1, G2c2, G2c3))
-
-        initial_bound_real = max([self.initial_bound_real_case(self._G2free, p, G1c3)
-                      for p in realSup1]
-                     + [self.initial_bound_real_case(self._G1free, p, G2c3)
-                        for p in realSup2]
-                     + [0])
-
-        initial_bound_complex = max([self.initial_bound_complex_case(
-            self._G2free, p, self._g02, G1c3) for p in complexSup1]
-                        + [self.initial_bound_complex_case(
-                            self._G1free, p, self._g01, G2c3)
-                           for p in complexSup2]
-                        + [0])
-
-        G1finite_init = []
-        initial_bound_finite_G1 = 0
-        for prime in finiteSup1:
-            B1, M0, M = self.initial_bound_finite_case(
-                self._G2free, prime, self._g02, G1c3, self._Kembeddings)
-            G1finite_init.append([prime, M0, M])
-            initial_bound_finite_G1 = max(initial_bound_finite_G1, B1)
-
-        G2finite_init = []
-        initial_bound_finite_G2 = 0
-        for prime in finiteSup2:
-            B1, M0, M = self.initial_bound_finite_case(
-                self._G1free, prime, self._g01, G2c3, self._Kembeddings)
-            G2finite_init.append([prime, M0, M])
-            initial_bound_finite_G2 = max(initial_bound_finite_G2, B1)
-        initial_bound_finite = max(initial_bound_finite_G1, initial_bound_finite_G2)
-
-        self._finite_init = (G1finite_init, G2finite_init)
-        self._linear_forms_in_logarithms_bound = self._RR(
-            max(initial_bound_real, initial_bound_complex, initial_bound_finite)
-        ).floor()
-        if self.verbose:
-            print("initial bound: %s" % self._linear_forms_in_logarithms_bound)
-
-        return self._RR(max(initial_bound_real, initial_bound_complex, initial_bound_finite)).floor()
-
-    def _reduce_bound(self, bound_G1, bound_G2=None):
-        r"""
-        Compute and cache step 2: the reduced upper bound, starting from the
-        initial bounds ``bound_G1`` and  ``bound_G2``.
-        """
-        same = self._same_groups(self._G1all, self._G2all)
-
-        reduced_bound_real_G1 = self._reduce_real(self.supports[0][1], self._G2free,
-                                   self.c[0][2], self._G1free, bound_G1)
-        reduced_bound_complex_G1 = self._reduce_complex(self.supports[0][2], self._G2free,
-                                         self._g02, self.c[0][2], self._G1free,
-                                         bound_G1)
-        reduced_bound_finite_G1 = self._reduce_finite(self._finite_init[0], self._G1free,
-                                       self.c[0][2], bound_G1)
-
-        if self.verbose:
-            print(f"The bounds for G1 after the reduction are: {reduced_bound_real_G1}, {reduced_bound_complex_G1}, "
-                  f"{reduced_bound_finite_G1}")
-        reduced_bound_G1 = self._RR(
-            max(reduced_bound_real_G1, reduced_bound_complex_G1, reduced_bound_finite_G1)
-        ).floor()
-
-        reduced_bound_G2 = None
-        if not same:
-            reduced_bound_real_G2 = self._reduce_real(self.supports[1][1], self._G1free, self.c[1][2], self._G2free,
-                                                      bound_G2)
-            reduced_bound_complex_G2 = self._reduce_complex(self.supports[1][2], self._G1free, self._g01, self.c[1][2],
-                                                            self._G2free, bound_G2)
-            reduced_bound_finite_G2 = self._reduce_finite(self._finite_init[1], self._G2free, self.c[1][2],
-                                                          bound_G2)
-            reduced_bound_G2 = self._RR(
-                max(reduced_bound_real_G2, reduced_bound_complex_G2, reduced_bound_finite_G2)
-            ).floor()
-            if self.verbose:
-                print(f"The bounds for G2 after the reduction are: {reduced_bound_real_G2}, {reduced_bound_complex_G2}, "
-                      f"{reduced_bound_finite_G2}")
-            return reduced_bound_G1, reduced_bound_G2
-
-        return reduced_bound_G1, reduced_bound_G2
-
-    def _reduce_real(self, places, other_free, c3, self_free, B0):
-        r"""
-        Reduce the bound at a list of real places.
-
-        ``c3`` is the constant of the group whose exponents are being
-        bounded (with free generators ``self_free``), and ``other_free`` are
-        the free generators of the other group.
-        """
-        B_side = 0
-        for place in places:
-            Bold = B0
-            finish = False
-            while not finish:
-                Bnew, increase_precision = self.reduction_step_real_case(
-                    place, Bold, other_free, c3)
-                if not increase_precision:
-                    if Bnew < Bold:
-                        Bold = Bnew
-                        if Bold <= 2:
-                            finish = True
-                            Bold = 2
-                    else:
-                        finish = True
-                else:
-                    c3 = self.c_constants(
-                        self_free, 2 * place.codomain().precision())[2]
-                    place = self.higher_precision(
-                        place, 2 * place.codomain().precision())
-            B_side = max(B_side, Bold)
-        return B_side
-
-    def _reduce_complex(self, places, other_free, other_torsion, c3,
-                        self_free, B0):
-        r"""
-        Reduce the bound at a list of complex places.
-        """
-        B_side = 0
-        for place in places:
-            B_place = 0
-            for g0 in [other_torsion ** i
-                       for i in range(other_torsion.multiplicative_order())]:
-                Bold = B0
-                finish = False
-                while not finish:
-                    Bnew, increase_precision = \
-                        self.reduction_step_complex_case(
-                            place, Bold, other_free, g0, c3 / 2)
-                    if not increase_precision:
-                        if Bnew < Bold:
-                            Bold = Bnew
-                            if Bold <= 2:
-                                finish = True
-                                Bold = 2
-                        else:
-                            finish = True
-                    else:
-                        c3 = self.c_constants(
-                            self_free, 2 * place.codomain().precision())[2]
-                        place = self.higher_precision(
-                            place, 2 * place.codomain().precision())
-                B_place = max(B_place, Bold)
-            B_side = max(B_side, B_place)
-        return B_side
-
-    def _reduce_finite(self, finite_init, self_free, c3, B0):
-        r"""
-        Reduce the bound at the finite places using the precomputed data
-        ``finite_init`` (a list of ``[prime, M0, M]`` triples).
-        """
-        B_side = 0
-        for P in finite_init:
-            B_place = 0
-            if len(P[2]) != 0:
-                prec = self.prec
-                M_logp = [embedding_to_Kp(log_p(m, P[0], prec), P[0], prec)
-                          for m in P[2]]
-                for m0 in P[1]:
-                    Bold = B0
-                    finish = False
-                    while not finish:
-                        Bnew, increase_precision = \
-                            self.reduction_step_finite_case(
-                                P[0], Bold, P[2], M_logp, m0, c3, prec)
-                        if not increase_precision:
-                            if Bnew < Bold:
-                                Bold = Bnew
-                                if Bold <= 2:
-                                    finish = True
-                                    Bold = 2
-                            else:
-                                finish = True
-                        else:
-                            prec *= 2
-                            c3 = self.c_constants(self_free, prec)[2]
-                            M_logp = [embedding_to_Kp(
-                                log_p(m, P[0], prec), P[0], prec)
-                                for m in P[2]]
-                    B_place = max(B_place, Bold)
-            B_side = max(B_side, B_place)
-        return B_side
-
-    # ------------------------------------------------------------------ #
-    # enumeration (step 3)
-    # ------------------------------------------------------------------ #
-    def _in_G2(self, y):
-        r"""
-        Return ``True`` if ``y`` lies in `G_2`.
-        """
-        if y == 0:
+        if u == 0:
             return False
-        if len(self._G2all) == 0:
-            return y == 1
-        if self._G2_ctx is None:
-            self._G2_ctx = self._group_context(self._G2all)
-        SunitK, A, supp = self._G2_ctx
-        if not self.K.ideal(y).is_S_unit(S=supp):
-            return False
-        return vector(SunitK(y).list()) in A.row_space()
-
-    def _simple_loop(self, B):
-        r"""
-        Enumerate the solutions `x` of `x + y = 1` with the exponents of
-        `x` in `G_1` bounded by ``B`` in absolute value.
-        """
-        solutions = []
-        r = len(self._G1free)
-        for zeta in self._torsion1:
-            for e in _iproduct(*([range(-B, B + 1)] * r)):
-                x = zeta * prod(g ** ei for g, ei in zip(self._G1free, e))
-                if self._in_G2(1 - x):
-                    if x not in solutions:
-                        solutions.append(x)
-        return solutions
-
-    def solve(self):
-        r"""
-        Return the list of all `x` in `G_1` such that `1 - x` lies in `G_2`.
-
-        EXAMPLES::
-
-            sage: import os, sys
-            sage: sys.path.insert(0, os.getcwd())
-            sage: from s_unit_equation import SUnitSolver
-            sage: K.<a> = NumberField(x^2 + 5)
-            sage: S = K.primes_above(30)
-            sage: G = [g for g in K.S_unit_group(S=S).gens_values()
-            ....:      if g.multiplicative_order() == Infinity]
-            sage: sols = SUnitSolver(G, G).solve()
-            sage: all(x + y == 1 for x, y in SUnitSolver(G, G).solve_pairs())
-            True
-        """
-        reduced_bound_G1, reduced_bound_G2 = self.bound_exponents()
-        return self._simple_loop(reduced_bound_G1)
-
-    def solve_pairs(self):
-        r"""
-        Return the list of pairs ``(x, 1 - x)`` solving the equation.
-        """
-        return [(x, 1 - x) for x in self.solve()]
+        return K.ideal(u).is_S_unit(list(SUK.primes()))
